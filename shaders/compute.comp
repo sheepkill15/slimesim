@@ -1,0 +1,112 @@
+#version 440
+
+#define PI 3.14159
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(rgba32f, binding = 0) uniform readonly image2D img_output;
+
+uniform double deltaTime;
+
+uniform double elapsedTime;
+
+struct Agent {
+    float pos_x;    // 4
+    float pos_y;    // 4
+    float angle;  // 4
+};
+
+layout(std430, binding = 1) buffer Agents {
+    Agent all_agents[];     // 8
+};
+
+layout(std140, binding = 2) uniform WindowSize {
+    uint width;
+    uint height;
+};
+
+layout(std140, binding = 3) uniform SimulationSettings {
+    int offsetAngle;
+    int sensorDistance ;
+    int sensorSize ;
+    float turnSpeed;
+    int moveSpeed;
+};
+
+// Hash function www.cs.ubc.ca/~rbridson/docs/schechter-sca08-turbulence.pdf
+uint hash(uint state)
+{
+    state ^= 2747636419u;
+    state *= 2654435769u;
+    state ^= state >> 16;
+    state *= 2654435769u;
+    state ^= state >> 16;
+    state *= 2654435769u;
+    return state;
+}
+
+float scaleToRange01(uint state)
+{
+    return 2 *  float(state) / 4294967295.0;
+}
+
+float getAverage(ivec2 coord, float angle)
+{
+    float sum = 0;
+
+    const ivec2 circlePos = coord + ivec2(int(cos(angle) * sensorDistance), int(sin(angle) * sensorDistance));
+
+    for(int offsetX = -sensorSize; offsetX <= sensorSize; offsetX++) {
+      for(int offsetY = -sensorSize; offsetY <= sensorSize; offsetY++) {
+        sum += imageLoad(img_output, ivec2(min(width - 1, max(0, circlePos.x + offsetX)), min(height - 1, max(0, circlePos.y + offsetY)))).r;
+      }
+    }
+
+    return sum;
+}
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+    if(index >= all_agents.length()) return;
+    const ivec2 coords = ivec2(all_agents[index].pos_x, all_agents[index].pos_y);
+    vec4 pixel = vec4(1);
+
+    const int pos_x = int(all_agents[index].pos_x);
+    const int pos_y = int(all_agents[index].pos_y);
+    const uint random = hash(pos_y * width + pos_x * hash(index + uint(elapsedTime) * 100000));
+
+    const float agentAngle = all_agents[index].angle;
+
+    const float randomSteerStrength = scaleToRange01(random);
+
+    const float weightForward = getAverage(coords, agentAngle);
+    const float weightLeft = getAverage(coords, agentAngle - offsetAngle * PI / 180);
+    const float weightRight = getAverage(coords, agentAngle + offsetAngle * PI / 180);
+
+    if(weightForward > weightLeft && weightForward > weightRight) {
+      all_agents[index].angle += 0;
+    }
+    else if(weightForward < weightLeft && weightForward < weightRight) {
+      all_agents[index].angle += float((randomSteerStrength - 0.5) * 2 * PI * turnSpeed * deltaTime);
+    }
+    else if(weightRight > weightLeft) {
+      all_agents[index].angle -= float(randomSteerStrength * 2 * PI * turnSpeed * deltaTime);
+    }
+    else if(weightLeft > weightRight) {
+      all_agents[index].angle += float(randomSteerStrength * 2 * PI * turnSpeed * deltaTime);
+    }
+    
+    float deltaX = float(cos(agentAngle) * moveSpeed * deltaTime);
+    float deltaY = float(sin(agentAngle) * moveSpeed * deltaTime);
+
+    all_agents[index].pos_x += deltaX;
+    all_agents[index].pos_y += deltaY;
+
+    if(pos_x >= width || pos_x < 0 || pos_y >= height || pos_y < 0) {
+        uint newRandom = hash(random);
+        float randomAngle = scaleToRange01(random) * 2 * PI;
+        all_agents[index].angle = randomAngle;
+        all_agents[index].pos_x = min(width - 1, max(0, all_agents[index].pos_x));
+        all_agents[index].pos_y = min(height - 1, max(0, all_agents[index].pos_y));
+    }
+}
